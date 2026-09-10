@@ -1,4 +1,5 @@
 import asyncio
+import os
 from logging.config import fileConfig
 
 from sqlalchemy import pool
@@ -8,7 +9,6 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 from alembic import context
 
 # 1. Import application settings and ORM Declarative Base
-from app.core.config import settings
 from app.core.database import Base
 import app.models  # Ensures all models register on Base.metadata
 
@@ -20,8 +20,24 @@ if config.config_file_name is not None:
 # 2. Target metadata for autogenerate support
 target_metadata = Base.metadata
 
-# Override alembic.ini URL with environment dynamic database URL
-config.set_main_option("sqlalchemy.url", settings.ASYNC_DATABASE_URL)
+# 3. Read DATABASE_URL from Render/System Environment
+db_url = os.getenv("DATABASE_URL")
+if not db_url:
+    from app.core.config import settings
+    db_url = settings.ASYNC_DATABASE_URL
+
+# Normalize protocol dialect for SQLAlchemy AsyncPG
+if db_url.startswith("postgresql://"):
+    db_url = db_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+elif db_url.startswith("postgres://"):
+    db_url = db_url.replace("postgres://", "postgresql+asyncpg://", 1)
+
+# Ensure query parameters are compatible with asyncpg
+if "sslmode=require" in db_url and "channel_binding" in db_url:
+    # asyncpg expects ssl=require rather than libpq channel_binding
+    db_url = db_url.split("&channel_binding=")[0]
+
+config.set_main_option("sqlalchemy.url", db_url)
 
 
 def run_migrations_offline() -> None:
