@@ -1,5 +1,8 @@
+import json
+import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+
 from app.core.config import settings
 from app.api.router import api_router
 from app.middleware.audit import AuditLoggingMiddleware
@@ -13,9 +16,24 @@ app = FastAPI(
 # 1. Audit Logging Middleware (runs inside CORS wrapper)
 app.add_middleware(AuditLoggingMiddleware)
 
-# 2. CORS Middleware (outermost layer so preflight and headers apply to all responses)
+# 2. Extract and sanitize production CORS origins
+cors_env = os.getenv("BACKEND_CORS_ORIGINS", "")
+if cors_env.startswith("["):
+    origins = json.loads(cors_env)
+elif cors_env:
+    origins = [origin.strip() for origin in cors_env.split(",") if origin.strip()]
+else:
+    origins = [
+        "https://www.bacchusdistilleryindia.com",
+        "https://bacchusdistilleryindia.com",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ]
+
+# 3. CORS Middleware (outermost layer so preflight headers attach to all responses)
 app.add_middleware(
     CORSMiddleware,
+    allow_origins=origins,
     allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
     allow_credentials=True,
     allow_methods=["*"],
