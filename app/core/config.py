@@ -28,6 +28,20 @@ class Settings(BaseSettings):
 
     @computed_field
     def ASYNC_DATABASE_URL(self) -> str:
+        # If DATABASE_URL is provided in environment, sanitize it for asyncpg
+        import os
+        raw_url = os.getenv("DATABASE_URL")
+        if raw_url:
+            cleaned = raw_url
+            if cleaned.startswith("postgresql://"):
+                cleaned = cleaned.replace("postgresql://", "postgresql+asyncpg://", 1)
+            elif cleaned.startswith("postgres://"):
+                cleaned = cleaned.replace("postgres://", "postgresql+asyncpg://", 1)
+            cleaned = cleaned.replace("sslmode=require", "ssl=require")
+            if "&channel_binding=" in cleaned:
+                cleaned = cleaned.split("&channel_binding=")[0]
+            return cleaned
+
         return f"postgresql+asyncpg://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}@{self.POSTGRES_SERVER}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")

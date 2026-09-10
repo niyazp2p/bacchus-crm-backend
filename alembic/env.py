@@ -17,24 +17,25 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# 2. Target metadata for autogenerate support
 target_metadata = Base.metadata
 
-# 3. Read DATABASE_URL from Render/System Environment
+# 2. Extract database URL
 db_url = os.getenv("DATABASE_URL")
 if not db_url:
     from app.core.config import settings
     db_url = settings.ASYNC_DATABASE_URL
 
-# Normalize protocol dialect for SQLAlchemy AsyncPG
+# Normalize dialect prefix
 if db_url.startswith("postgresql://"):
     db_url = db_url.replace("postgresql://", "postgresql+asyncpg://", 1)
 elif db_url.startswith("postgres://"):
     db_url = db_url.replace("postgres://", "postgresql+asyncpg://", 1)
 
-# Ensure query parameters are compatible with asyncpg
-if "sslmode=require" in db_url and "channel_binding" in db_url:
-    # asyncpg expects ssl=require rather than libpq channel_binding
+# Clean query arguments for asyncpg compatibility
+if "sslmode=" in db_url:
+    db_url = db_url.replace("sslmode=require", "ssl=require")
+
+if "&channel_binding=" in db_url:
     db_url = db_url.split("&channel_binding=")[0]
 
 config.set_main_option("sqlalchemy.url", db_url)
