@@ -1,3 +1,4 @@
+import uuid
 from datetime import datetime
 from fastapi import APIRouter, Depends, status, HTTPException
 from sqlalchemy import select, func
@@ -6,22 +7,24 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.models.lead import Lead, LeadStatus, LeadTier, CommercialModel
 from app.models.activity import LeadActivity, ActivityType
+from app.models.user import User
 from app.schemas.inquiry import ContactInquiryPayload, ContactInquiryResponse
 
 router = APIRouter(prefix="/inquiries", tags=["Public Inquiries"])
 
-CATEGORY_MAPPING = {
+CATEGORY_MAP = {
     "General Corporate Inquiries": CommercialModel.DISTRIBUTION,
     "Global Distribution Partnership": CommercialModel.DISTRIBUTION,
     "Private Label & Turnkey Distillation": CommercialModel.PRIVATE_LABEL,
     "Institutional Spirit Allocation": CommercialModel.STATE_OWNERSHIP,
 }
 
-async def generate_lead_code(db: AsyncSession) -> str:
+async def generate_unique_lead_code(db: AsyncSession) -> str:
     stmt = select(func.count(Lead.id))
     result = await db.execute(stmt)
     count = (result.scalar() or 0) + 1
-    return f"BAC-LD-{count:05d}"
+    suffix = uuid.uuid4().hex[:4].upper()
+    return f"BAC-LD-{count:04d}-{suffix}"
 
 @router.post(
     "/contact",
@@ -33,52 +36,65 @@ async def submit_public_inquiry(
     payload: ContactInquiryPayload,
     db: AsyncSession = Depends(get_db)
 ):
-    model = CATEGORY_MAPPING.get(payload.category, CommercialModel.DISTRIBUTION)
-    lead_code = await generate_lead_code(db)
+    try:
+        category_val = payload.category or "General Corporate Inquiries"
+        model = CATEGORY_MAP.get(category_val, CommercialModel.DISTRIBUTION)
+        lead_code = await generate_unique_lead_code(db)
 
-    # Automated scoring rules
-    is_high_volume = payload.category in [
-        "Global Distribution Partnership",
-        "Institutional Spirit Allocation"
-    ]
-    computed_score = 65 if is_high_volume else 40
-    computed_tier = LeadTier.WARM if is_high_volume else LeadTier.COLD
+        is_high_volume = category_val in [
+            "Global Distribution Partnership",
+            "Institutional Spirit Allocation"
+        ]
 
-    new_lead = Lead(
-        lead_code=lead_code,
-        company_name=payload.name.strip(),
-        contact_name=payload.name.strip(),
-        email=payload.email.strip().lower(),
-        phone=None,
-        country="India",
-        state=None,
-        commercial_model=model,
-        volume_estimate=payload.message[:250],
-        score=computed_score,
-        tier=computed_tier,
-        status=LeadStatus.NEW,
-    )
-    db.add(new_lead)
-    await db.flush()
+        # 1. Create Lead Record
+        new_lead = Lead(
+            lead_code=lead_code,
+            company_name=payload.name.strip(),
+            contact_name=payload.name.strip(),
+            email=str(payload.email).strip().lower(),
+            phone=None,
+            country="India",
+            state=None,
+            commercial_model=model,
+            volume_estimate=(payload.message.strip())[:250],
+            score=65 if is_high_volume else 40,
+            tier=LeadTier.WARM if is_high_volume else LeadTier.COLD,
+            status=LeadStatus.NEW,
+        )
+        db.add(new_lead)
+        await db.flush()
 
-    # Log full initial message to the lead activity timeline
-    activity = LeadActivity(
-        lead_id=new_lead.id,
-        user_id=None,
-        type=ActivityType.NOTE,
-        meta_data={
-            "source": "WEBSITE_CONTACT_LEDGER",
-            "category_selected": payload.category,
-            "full_dispatch": payload.message.strip(),
-            "timestamp": datetime.utcnow().isoformat(),
-        }
-    )
-    db.add(activity)
-    await db.commit()
+        # 2. Resolve an administrative user ID to satisfy NOT NULL constraint
+        user_stmt = select(User.id).order_by(User.created_at.asc()).limit(1)
+        system_user_id = (await db.execute(user_stmt)).scalar_one_or_none()
 
-    return ContactInquiryResponse(
-        success=True,
-        reference_code=lead_code,
-        message="Your dispatch has been registered in the institutional ledger.",
-        received_at=datetime.utcnow()
-    )
+        # 3. Log initial dispatch activity
+        if system_user_id:
+            activity = LeadActivity(
+                lead_id=new_lead.id,
+                user_id=system_user_id,
+                type=ActivityType.NOTE,
+                meta_data={
+                    "source": "WEBSITE_CONTACT_LEDGER",
+                    "category_selected": category_val,
+                    "full_dispatch": payload.message.strip(),
+                    "timestamp": datetime.utcnow().isoformat(),
+                }
+            )
+            db.add(activity)
+
+        await db.commit()
+
+        return ContactInquiryResponse(
+            success=True,
+            reference_code=lead_code,
+            message="Your dispatch has been registered in the institutional ledger.",
+            received_at=datetime.utcnow()
+        )
+
+    except Exception as exc:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to record inquiry dispatch: {str(exc)}"
+        )
