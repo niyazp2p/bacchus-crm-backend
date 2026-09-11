@@ -46,13 +46,13 @@ async def submit_public_inquiry(
             "Institutional Spirit Allocation"
         ]
 
-        # 1. Create Lead Record
+        # 1. Ingest Lead Record with direct phone number
         new_lead = Lead(
             lead_code=lead_code,
             company_name=payload.name.strip(),
             contact_name=payload.name.strip(),
             email=str(payload.email).strip().lower(),
-            phone=None,
+            phone=payload.phone.strip() if payload.phone else None,
             country="India",
             state=None,
             commercial_model=model,
@@ -64,11 +64,11 @@ async def submit_public_inquiry(
         db.add(new_lead)
         await db.flush()
 
-        # 2. Resolve an administrative user ID to satisfy NOT NULL constraint
+        # 2. System user fallback for foreign key constraint
         user_stmt = select(User.id).order_by(User.created_at.asc()).limit(1)
         system_user_id = (await db.execute(user_stmt)).scalar_one_or_none()
 
-        # 3. Log initial dispatch activity
+        # 3. Log initial message activity
         if system_user_id:
             activity = LeadActivity(
                 lead_id=new_lead.id,
@@ -77,6 +77,7 @@ async def submit_public_inquiry(
                 meta_data={
                     "source": "WEBSITE_CONTACT_LEDGER",
                     "category_selected": category_val,
+                    "phone": payload.phone.strip() if payload.phone else None,
                     "full_dispatch": payload.message.strip(),
                     "timestamp": datetime.utcnow().isoformat(),
                 }

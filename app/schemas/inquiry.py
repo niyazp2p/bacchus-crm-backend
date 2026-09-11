@@ -1,11 +1,13 @@
 from datetime import datetime
+from typing import Optional
 from pydantic import BaseModel, EmailStr, Field
 
 class ContactInquiryPayload(BaseModel):
-    name: str = Field(..., min_length=2, max_length=150)
+    name: str = Field(..., min_length=1, max_length=255)
     email: EmailStr
-    category: str = Field(..., min_length=3, max_length=100)
-    message: str = Field(..., min_length=5, max_length=3000)
+    phone: Optional[str] = Field(None, max_length=50)
+    category: Optional[str] = "General Corporate Inquiries"
+    message: str = Field(..., min_length=1, max_length=5000)
 
 class ContactInquiryResponse(BaseModel):
     success: bool
