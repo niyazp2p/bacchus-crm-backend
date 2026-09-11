@@ -10,6 +10,7 @@ from app.api.v1 import (
     products,
     invoices,
     audit_logs,
+    inquiries,
 )
 
 api_router = APIRouter()
@@ -23,3 +24,4 @@ api_router.include_router(customers.router)
 api_router.include_router(products.router)
 api_router.include_router(invoices.router)
 api_router.include_router(audit_logs.router)
+api_router.include_router(inquiries.router)
