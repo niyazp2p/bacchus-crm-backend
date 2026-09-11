@@ -1,5 +1,5 @@
 import uuid
-from typing import Annotated, Sequence
+from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select, func, desc
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -9,6 +9,8 @@ from app.dependencies.auth import get_current_active_user, require_roles
 from app.models.user import User, RoleType
 from app.models.lead import Lead, LeadStatus, LeadTier, CommercialModel
 from app.models.activity import LeadActivity, ActivityType
+from app.models.follow_up import FollowUp
+from app.models.customer import Conversion
 from app.schemas.lead import LeadCreate, LeadUpdate, LeadResponse
 from app.services.lead_scoring import calculate_lead_score
 
@@ -58,9 +60,15 @@ async def create_lead(
         lead_id=lead.id,
         user_id=current_user.id,
         type=ActivityType.NOTE,
-        meta_data={"action": "Lead ingestion via CRM API", "initial_score": score, "tier": tier.value},
+        meta_data={
+            "action": "Lead ingestion via CRM API",
+            "initial_score": score,
+            "tier": tier.value,
+            "phone_registered": payload.phone,
+        },
     )
     db.add(activity)
+    await db.commit()
     await db.refresh(lead)
     return lead
 
@@ -158,6 +166,63 @@ async def update_lead(
             email=lead.email,
         )
 
-    await db.flush()
+    await db.commit()
     await db.refresh(lead)
     return lead
+
+@router.delete("/{lead_id}", status_code=status.HTTP_200_OK, summary="Delete lead inquiry")
+async def delete_lead(
+    lead_id: uuid.UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    current_user: Annotated[User, Depends(get_current_active_user)],
+):
+    # 1. Fetch Lead
+    stmt = select(Lead).where(Lead.id == lead_id)
+    result = await db.execute(stmt)
+    lead = result.scalar_one_or_none()
+
+    if not lead:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Lead record not found in system ledger.",
+        )
+
+    # Check RBAC permissions
+    if current_user.role == RoleType.TERRITORY_REP and lead.assigned_to_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied: Cannot delete lead outside your territory portfolio.",
+        )
+
+    # 2. Check if converted (prevent foreign key break in conversions/customers table)
+    conv_stmt = select(Conversion).where(Conversion.lead_id == lead_id)
+    conversion = (await db.execute(conv_stmt)).scalar_one_or_none()
+    if conversion:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot delete lead that has already been converted to an institutional customer account.",
+        )
+
+    # 3. Clean up related child activities to ensure database integrity
+    act_stmt = select(LeadActivity).where(LeadActivity.lead_id == lead_id)
+    activities = (await db.execute(act_stmt)).scalars().all()
+    for act in activities:
+        await db.delete(act)
+
+    # 4. Clean up related follow-ups
+    fu_stmt = select(FollowUp).where(FollowUp.lead_id == lead_id)
+    follow_ups = (await db.execute(fu_stmt)).scalars().all()
+    for fu in follow_ups:
+        await db.delete(fu)
+
+    # 5. Expunge Lead
+    lead_code = lead.lead_code
+    company_name = lead.company_name
+    await db.delete(lead)
+    await db.commit()
+
+    return {
+        "status": "success",
+        "message": f"Inquiry '{company_name}' ({lead_code}) expunged from operations ledger.",
+        "id": str(lead_id),
+    }
